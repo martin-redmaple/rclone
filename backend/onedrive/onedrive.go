@@ -2272,8 +2272,11 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		return errors.New("can't upload content to a OneNote file")
 	}
 
-	o.fs.tokenRenewer.Start()
-	defer o.fs.tokenRenewer.Stop()
+	// Only start the renewer if we have a valid one
+	if o.fs.tokenRenewer != nil {
+		o.fs.tokenRenewer.Start()
+		defer o.fs.tokenRenewer.Stop()
+	}
 
 	size := src.Size()
 	modTime := src.ModTime(ctx)
