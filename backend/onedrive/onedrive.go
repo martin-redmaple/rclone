@@ -38,6 +38,7 @@ import (
 	"github.com/rclone/rclone/lib/readers"
 	"github.com/rclone/rclone/lib/rest"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
 )
 
 const (
@@ -62,11 +63,13 @@ const (
 
 // Globals
 var (
-	authPath  = "/common/oauth2/v2.0/authorize"
-	tokenPath = "/common/oauth2/v2.0/token"
+	authPath  = "/oauth2/v2.0/authorize"
+	tokenPath = "/oauth2/v2.0/token"
+	commonTenantName = "common"
 
 	scopeAccess             = fs.SpaceSepList{"Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "Sites.Read.All", "offline_access"}
 	scopeAccessWithoutSites = fs.SpaceSepList{"Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "offline_access"}
+	scopeAccessClientCred	= fs.SpaceSepList{".default"}
 
 	// Description of how to auth for this app for a business account
 	oauthConfig = &oauth2.Config{
@@ -302,6 +305,27 @@ At the time of writing this only works with OneDrive personal paid accounts.
 				encoder.EncodeRightSpace |
 				encoder.EncodeWin |
 				encoder.EncodeInvalidUtf8),
+		},{
+			Name: "client_credential",
+			Default: false,
+			Help: `Use client credential OAuth flow
+This will use the identity of the application to access OneDrive resources, rather that a user identity.
+
+https://docs.microsoft.com/en-us/azure/active-directory/develop/msal-authentication-flows#client-credentials
+
+Set to False, unless you specifically want to use this flow (typically for service account type access)
+		`,
+		Advanced: true,
+		},{
+			Name: "tenant_name",
+			Default: "",
+			Help: `The domain name of the tenant that we are targeting
+This is required in order to correctly request OAuth tokens using the client credential flow
+
+This can be left blank if not using Client Credential OAuth flow
+		`,
+		Advanced: true,
+
 		}}...),
 	})
 }
@@ -422,31 +446,80 @@ func chooseDrive(ctx context.Context, name string, m configmap.Mapper, srv *rest
 func Config(ctx context.Context, name string, m configmap.Mapper, config fs.ConfigIn) (*fs.ConfigOut, error) {
 	region, graphURL := getRegionURL(m)
 
-	if config.State == "" {
-		var accessScopes fs.SpaceSepList
-		accessScopesString, _ := m.Get("access_scopes")
-		err := accessScopes.Set(accessScopesString)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse access_scopes: %w", err)
-		}
-		oauthConfig.Scopes = []string(accessScopes)
-		disableSitePermission, _ := m.Get("disable_site_permission")
-		if disableSitePermission == "true" {
-			oauthConfig.Scopes = scopeAccessWithoutSites
-		}
-		oauthConfig.Endpoint = oauth2.Endpoint{
-			AuthURL:  authEndpoint[region] + authPath,
-			TokenURL: authEndpoint[region] + tokenPath,
-		}
-		return oauthutil.ConfigOut("choose_type", &oauthutil.Options{
-			OAuth2Config: oauthConfig,
-		})
+	// Parse config into Options struct
+	opt := new(Options)
+	err := configstruct.Set(m, opt)
+	if err != nil {
+		return nil, err
 	}
 
-	oAuthClient, _, err := oauthutil.NewClient(ctx, name, m, oauthConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to configure OneDrive: %w", err)
+	if config.State == "" {
+		
+		if !opt.ClientCredential {
+
+			oauthConfig.Endpoint = oauth2.Endpoint{
+				AuthURL:  authEndpoint[region] + "/" + commonTenantName + authPath,
+				TokenURL: authEndpoint[region] + "/" + commonTenantName +tokenPath,
+			}
+
+			var accessScopes fs.SpaceSepList
+			accessScopesString, _ := m.Get("access_scopes")
+			err := accessScopes.Set(accessScopesString)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse access_scopes: %w", err)
+			}
+			oauthConfig.Scopes = []string(accessScopes)
+			disableSitePermission, _ := m.Get("disable_site_permission")
+			if disableSitePermission == "true" {
+				oauthConfig.Scopes = scopeAccessWithoutSites
+			}
+			return oauthutil.ConfigOut("choose_type", &oauthutil.Options{
+				OAuth2Config: oauthConfig,
+			})
+		} else {
+
+			oauthConfig, _ = oauthutil.OverrideCredentials("", m, oauthConfig)
+
+			oauthConfig.Endpoint = oauth2.Endpoint{
+				AuthURL:  authEndpoint[region] + "/" + opt.TenantName + authPath,
+				TokenURL: authEndpoint[region] + "/" + opt.TenantName + tokenPath,
+			}
+
+			oauthConfig.Scopes = scopeAccessClientCred
+			return fs.ConfigGoto("choose_type")
+		}
 	}
+
+	// Declare the OAuth client and token source variables assigned below
+	var oAuthClient *http.Client
+
+	// Determine if we are using a client credential OAuth flow
+	if opt.ClientCredential {
+
+		// Create the ClientCredential config structure
+		var conf clientcredentials.Config
+
+		conf.ClientID = oauthConfig.ClientID
+		conf.ClientSecret = oauthConfig.ClientSecret
+		conf.Scopes = oauthConfig.Scopes
+		conf.TokenURL = oauthConfig.Endpoint.TokenURL
+		// 	ClientID:     ,
+		// 	ClientSecret: 
+		// 	Scopes:       oauthConfig.Scopes,
+		// 	TokenURL:     ,
+		// }
+		
+		// Create the oauth client credentials client
+		oAuthClient = conf.Client(ctx)
+
+	} else {
+
+		oAuthClient, _, err = oauthutil.NewClient(ctx, name, m, oauthConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to configure OneDrive: %w", err)
+		}
+	}
+
 	srv := rest.NewClient(oAuthClient)
 
 	switch config.State {
@@ -598,6 +671,8 @@ type Options struct {
 	LinkType                string               `config:"link_type"`
 	LinkPassword            string               `config:"link_password"`
 	Enc                     encoder.MultiEncoder `config:"encoding"`
+	ClientCredential		bool				 `config:"client_credential"`	
+	TenantName				string				 `config:"tenant_name"`
 }
 
 // Fs represents a remote one drive
@@ -857,6 +932,8 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 
 	rootURL := graphAPIEndpoint[opt.Region] + "/v1.0" + "/drives/" + opt.DriveID
+
+	// Update the scopes within our OAuth config structure based on those stored in the config
 	oauthConfig.Scopes = opt.AccessScopes
 	if opt.DisableSitePermission {
 		oauthConfig.Scopes = scopeAccessWithoutSites
@@ -867,11 +944,34 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 
 	root = parsePath(root)
-	oAuthClient, ts, err := oauthutil.NewClient(ctx, name, m, oauthConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to configure OneDrive: %w", err)
-	}
 
+	// Declare the OAuth client and token source variables assigned below
+	var oAuthClient *http.Client
+	var ts *oauthutil.TokenSource
+
+	// Determine if we are using a client credential OAuth flow
+	if opt.ClientCredential {
+
+		// Create the ClientCredential config structure
+		conf := clientcredentials.Config{
+			ClientID:     oauthConfig.ClientID,
+			ClientSecret: oauthConfig.ClientSecret,
+			Scopes:       oauthConfig.Scopes,
+			TokenURL:     oauthConfig.Endpoint.TokenURL,
+		}
+		
+		// Create the oauth client credentials client
+		oAuthClient = conf.Client(ctx)
+
+	} else { // Else, using a standard OAuth user based flow
+
+		oAuthClient, ts, err = oauthutil.NewClient(ctx, name, m, oauthConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to configure OneDrive: %w", err)
+		}
+
+	}
+	 
 	ci := fs.GetConfig(ctx)
 	f := &Fs{
 		name:      name,
@@ -891,11 +991,14 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}).Fill(ctx, f)
 	f.srv.SetErrorHandler(errorHandler)
 
-	// Renew the token in the background
-	f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
-		_, _, err := f.readMetaDataForPath(ctx, "")
-		return err
-	})
+	// Only do this if using standard OAuth flow (i.e. not Client Credential)
+	if !opt.ClientCredential {
+		// Renew the token in the background
+		f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
+			_, _, err := f.readMetaDataForPath(ctx, "")
+			return err
+		})
+	}
 
 	// Get rootID
 	var rootID = opt.RootFolderID
