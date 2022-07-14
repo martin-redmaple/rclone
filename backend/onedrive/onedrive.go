@@ -63,12 +63,19 @@ const (
 
 // Globals
 var (
+	
+	// Define the paths used for token operations
 	authPath  = "/oauth2/v2.0/authorize"
 	tokenPath = "/oauth2/v2.0/token"
+	
+	// When using user based OAuth flows, there is no need to specify the tenant name
+	// in the token operation URLs - can use the name 'common'
 	commonTenantName = "common"
 
 	scopeAccess             = fs.SpaceSepList{"Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "Sites.Read.All", "offline_access"}
 	scopeAccessWithoutSites = fs.SpaceSepList{"Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "offline_access"}
+	// When using client credential OAuth flow, scope of .default is required in order
+	// to use the permissions configured for the application within the tenant
 	scopeAccessClientCred	= fs.SpaceSepList{".default"}
 
 	// Description of how to auth for this app for a business account
@@ -446,20 +453,22 @@ func chooseDrive(ctx context.Context, name string, m configmap.Mapper, srv *rest
 func Config(ctx context.Context, name string, m configmap.Mapper, config fs.ConfigIn) (*fs.ConfigOut, error) {
 	region, graphURL := getRegionURL(m)
 
-	// Parse config into Options struct
+	// Parse config into Options struct to allow easy access below
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
 	if err != nil {
 		return nil, err
 	}
 
+	// Check to see if this is the start of the state machine execution
 	if config.State == "" {
 		
+		// If using a user based OAuth flow (i.e. not client credential flow)
 		if !opt.ClientCredential {
-
+			// Populate the OAuth configuration properties
 			oauthConfig.Endpoint = oauth2.Endpoint{
 				AuthURL:  authEndpoint[region] + "/" + commonTenantName + authPath,
-				TokenURL: authEndpoint[region] + "/" + commonTenantName +tokenPath,
+				TokenURL: authEndpoint[region] + "/" + commonTenantName + tokenPath,
 			}
 
 			var accessScopes fs.SpaceSepList
@@ -473,19 +482,30 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 			if disableSitePermission == "true" {
 				oauthConfig.Scopes = scopeAccessWithoutSites
 			}
+			// Return the initial state that we should transition into. We need to 
+			// go through the configuration process within the oauthutil module
 			return oauthutil.ConfigOut("choose_type", &oauthutil.Options{
 				OAuth2Config: oauthConfig,
 			})
 		} else {
 
+			// Given we are using client credential flow, we will not be using the full
+			// OAuth config flow from within oauthutils, however, we do need to check if any
+			// of the oauth details have been overridden and apply them
 			oauthConfig, _ = oauthutil.OverrideCredentials("", m, oauthConfig)
 
+			// Construct the token operation URLs - note that the tenant name is required
+			// for client credential flow
 			oauthConfig.Endpoint = oauth2.Endpoint{
 				AuthURL:  authEndpoint[region] + "/" + opt.TenantName + authPath,
 				TokenURL: authEndpoint[region] + "/" + opt.TenantName + tokenPath,
 			}
 
+			// Use the scopes for client credential flow
 			oauthConfig.Scopes = scopeAccessClientCred
+
+			// Do not go into the full OAuth config - go directly to the choose_type
+			// state
 			return fs.ConfigGoto("choose_type")
 		}
 	}
@@ -499,27 +519,25 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 		// Create the ClientCredential config structure
 		var conf clientcredentials.Config
 
+		// Set the fields
 		conf.ClientID = oauthConfig.ClientID
 		conf.ClientSecret = oauthConfig.ClientSecret
 		conf.Scopes = oauthConfig.Scopes
 		conf.TokenURL = oauthConfig.Endpoint.TokenURL
-		// 	ClientID:     ,
-		// 	ClientSecret: 
-		// 	Scopes:       oauthConfig.Scopes,
-		// 	TokenURL:     ,
-		// }
 		
 		// Create the oauth client credentials client
 		oAuthClient = conf.Client(ctx)
 
 	} else {
 
+		// Using a standard OAuth flow as implemented in oauthutil, so create a client
 		oAuthClient, _, err = oauthutil.NewClient(ctx, name, m, oauthConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to configure OneDrive: %w", err)
 		}
 	}
 
+	// Create a REST client, build on the OAuth client created above
 	srv := rest.NewClient(oAuthClient)
 
 	switch config.State {
@@ -933,15 +951,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 
 	rootURL := graphAPIEndpoint[opt.Region] + "/v1.0" + "/drives/" + opt.DriveID
 
-	// Update the scopes within our OAuth config structure based on those stored in the config
-	oauthConfig.Scopes = opt.AccessScopes
-	if opt.DisableSitePermission {
-		oauthConfig.Scopes = scopeAccessWithoutSites
-	}
-	oauthConfig.Endpoint = oauth2.Endpoint{
-		AuthURL:  authEndpoint[opt.Region] + authPath,
-		TokenURL: authEndpoint[opt.Region] + tokenPath,
-	}
+	
 
 	root = parsePath(root)
 
@@ -952,18 +962,45 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	// Determine if we are using a client credential OAuth flow
 	if opt.ClientCredential {
 
-		// Create the ClientCredential config structure
-		conf := clientcredentials.Config{
-			ClientID:     oauthConfig.ClientID,
-			ClientSecret: oauthConfig.ClientSecret,
-			Scopes:       oauthConfig.Scopes,
-			TokenURL:     oauthConfig.Endpoint.TokenURL,
+		// Given we are using client credential flow, we will not be using the full
+		// OAuth config flow from within oauthutils, however, we do need to check if any
+		// of the oauth details have been overridden and apply them
+		oauthConfig, _ = oauthutil.OverrideCredentials("", m, oauthConfig)
+
+		// Construct the token operation URLs - note that the tenant name is required
+		// for client credential flow
+		oauthConfig.Endpoint = oauth2.Endpoint{
+			AuthURL:  authEndpoint[opt.Region] + "/" + opt.TenantName + authPath,
+			TokenURL: authEndpoint[opt.Region] + "/" + opt.TenantName + tokenPath,
 		}
+
+		// Use the scopes for client credential flow
+		oauthConfig.Scopes = scopeAccessClientCred
+
+		// Create the ClientCredential config structure
+		var conf clientcredentials.Config
+
+		// Set the fields
+		conf.ClientID = oauthConfig.ClientID
+		conf.ClientSecret = oauthConfig.ClientSecret
+		conf.Scopes = oauthConfig.Scopes
+		conf.TokenURL = oauthConfig.Endpoint.TokenURL
 		
 		// Create the oauth client credentials client
 		oAuthClient = conf.Client(ctx)
 
 	} else { // Else, using a standard OAuth user based flow
+
+		oauthConfig.Endpoint = oauth2.Endpoint{
+			AuthURL:  authEndpoint[opt.Region] + "/" + commonTenantName + authPath,
+			TokenURL: authEndpoint[opt.Region] + "/" + commonTenantName + tokenPath,
+		}
+
+		// Update the scopes within our OAuth config structure based on those stored in the config
+		oauthConfig.Scopes = opt.AccessScopes
+		if opt.DisableSitePermission {
+			oauthConfig.Scopes = scopeAccessWithoutSites
+		}
 
 		oAuthClient, ts, err = oauthutil.NewClient(ctx, name, m, oauthConfig)
 		if err != nil {
