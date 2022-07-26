@@ -320,11 +320,11 @@ func Context(ctx context.Context, client *http.Client) context.Context {
 	return context.WithValue(ctx, oauth2.HTTPClient, client)
 }
 
-// overrideCredentials sets the ClientID and ClientSecret from the
+// OverrideCredentials sets the ClientID and ClientSecret from the
 // config file if they are not blank.
 // If any value is overridden, true is returned.
 // the origConfig is copied
-func overrideCredentials(name string, m configmap.Mapper, origConfig *oauth2.Config) (newConfig *oauth2.Config, changed bool) {
+func OverrideCredentials(name string, m configmap.Mapper, origConfig *oauth2.Config) (newConfig *oauth2.Config, changed bool) {
 	newConfig = new(oauth2.Config)
 	*newConfig = *origConfig
 	changed = false
@@ -356,7 +356,7 @@ func overrideCredentials(name string, m configmap.Mapper, origConfig *oauth2.Con
 // TokenSource which Invalidate may need to be called on.  It uses the
 // httpClient passed in as the base client.
 func NewClientWithBaseClient(ctx context.Context, name string, m configmap.Mapper, config *oauth2.Config, baseClient *http.Client) (*http.Client, *TokenSource, error) {
-	config, _ = overrideCredentials(name, m, config)
+	config, _ = OverrideCredentials(name, m, config)
 	token, err := GetToken(name, m)
 	if err != nil {
 		return nil, nil, err
@@ -556,7 +556,7 @@ version recommended):
 		if err != nil {
 			return nil, err
 		}
-		oauthConfig, changed := overrideCredentials(name, m, opt.OAuth2Config)
+		oauthConfig, changed := OverrideCredentials(name, m, opt.OAuth2Config)
 		if changed {
 			fs.Logf(nil, "Make sure your Redirect URL is set to %q in your custom config.\n", oauthConfig.RedirectURL)
 		}
@@ -592,7 +592,7 @@ func noWebserverNeeded(oauthConfig *oauth2.Config) bool {
 
 // get the URL we need to send the user to
 func getAuthURL(name string, m configmap.Mapper, oauthConfig *oauth2.Config, opt *Options) (authURL string, state string, err error) {
-	oauthConfig, _ = overrideCredentials(name, m, oauthConfig)
+	oauthConfig, _ = OverrideCredentials(name, m, oauthConfig)
 
 	// Make random state
 	state, err = random.Password(128)
