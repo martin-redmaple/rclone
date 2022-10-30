@@ -35,7 +35,9 @@ const (
 func startServer(t *testing.T, f fs.Fs) {
 	opt := dlnaflags.DefaultOpt
 	opt.ListenAddr = testBindAddress
-	dlnaServer = newServer(f, &opt)
+	var err error
+	dlnaServer, err = newServer(f, &opt)
+	assert.NoError(t, err)
 	assert.NoError(t, dlnaServer.Serve())
 	baseURL = "http://" + dlnaServer.HTTPConn.Addr().String()
 }
@@ -119,6 +121,8 @@ func TestContentDirectoryBrowseMetadata(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body, err := ioutil.ReadAll(resp.Body)
 	require.NoError(t, err)
+	// should contain an appropriate URN
+	require.Contains(t, string(body), "urn:schemas-upnp-org:service:ContentDirectory:1")
 	// expect a <container> element
 	require.Contains(t, string(body), html.EscapeString("<container "))
 	require.NotContains(t, string(body), html.EscapeString("<item "))
